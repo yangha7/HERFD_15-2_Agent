@@ -7,6 +7,7 @@ Then open http://localhost:5051 in your browser.
 """
 
 import os
+import glob
 import sys
 import re
 import json
@@ -468,6 +469,88 @@ TOOLS = [
                     "color": {"type": "string", "description": "Line color. Default: blue."},
                 },
                 "required": ["filepath"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_macro",
+            "description": "Generate a SPEC XAS scan macro for a specific element and edge. Creates the energy grid and macro function automatically. The macro can be saved to a .mac file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "element": {"type": "string", "description": "Element symbol (e.g. 'Ru', 'Fe', 'Pt', 'Cu')."},
+                    "edge": {"type": "string", "description": "Edge name (e.g. 'K', 'L3', 'L2'). Default 'K'."},
+                    "count_time": {"type": "number", "description": "Default counting time per point in seconds. Default 1."},
+                    "xanes_step": {"type": "number", "description": "Step size in XANES region (eV). Default 0.3."},
+                    "exafs_end": {"type": "number", "description": "End of scan relative to E0 (eV). Default 500."},
+                    "include_exafs": {"type": "boolean", "description": "Include EXAFS macro. Default false."},
+                    "save": {"type": "boolean", "description": "Save to a .mac file. Default false."},
+                    "filename": {"type": "string", "description": "Output filename (e.g. 'Fe_XAS.mac'). Auto-generated if not given."},
+                },
+                "required": ["element"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_run",
+            "description": "Generate a batch run macro for multiple samples. Specify sample names, motor positions, counting times, and geometries. The macro calls the XAS scan macro for each sample sequentially.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "samples": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Sample/file name."},
+                                "Sx": {"type": "number", "description": "Sample X position."},
+                                "Sy": {"type": "number", "description": "Sample Y position."},
+                                "Sz": {"type": "number", "description": "Sample Z position."},
+                                "Sr": {"type": "number", "description": "Sample rotation (-165=grazing, -100=normal)."},
+                                "emiss": {"type": "number", "description": "Emission energy (eV)."},
+                                "count_time": {"type": "number", "description": "Counting time per point (sec)."},
+                                "n_scans": {"type": "integer", "description": "Number of repeat scans."},
+                                "filter": {"type": "integer", "description": "Number of filters. Default 0."},
+                                "geometry": {"type": "string", "description": "Geometry label (grazing/normal)."},
+                            },
+                        },
+                        "description": "List of sample configurations.",
+                    },
+                    "xas_macro": {"type": "string", "description": "Name of the XAS macro to call (e.g. 'Ru_xas'). Default auto-detected."},
+                    "save": {"type": "boolean", "description": "Save to a .mac file. Default false."},
+                    "filename": {"type": "string", "description": "Output filename. Default 'run.mac'."},
+                },
+                "required": ["samples"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_macro",
+            "description": "Display the contents of an existing .mac file from the data directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Macro filename (e.g. 'Ru_XAS.mac', 'run00.mac')."},
+                },
+                "required": ["filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_macros",
+            "description": "List all .mac files in the data directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
             },
         },
     },
@@ -1094,6 +1177,99 @@ def tool_plot_file(filepath: str, e_min: float = None, e_max: float = None,
     return f"Plotted {os.path.basename(filepath)} ({len(x[mask])} pts)."
 
 
+def tool_generate_macro(element: str, edge: str = "K", count_time: float = 1.0,
+                        xanes_step: float = 0.3, exafs_end: float = 500,
+                        include_exafs: bool = False, save: bool = False,
+                        filename: str = None, **kw) -> str:
+    try:
+        macro_text = hu.generate_xas_macro(
+            element, edge, count_time=count_time,
+            xanes_step=xanes_step, exafs_end=exafs_end,
+            include_exafs=include_exafs
+        )
+    except ValueError as e:
+        return str(e)
+
+    result = f"Generated {element} {edge}-edge XAS macro:\n\n```\n{macro_text}\n```"
+
+    if save:
+        if filename is None:
+            filename = f"{element}_XAS.mac"
+        if not filename.endswith(".mac"):
+            filename += ".mac"
+        out_dir = hu.ensure_export_dir("macros")
+        out_path = os.path.join(out_dir, filename)
+        with open(out_path, "w") as f:
+            f.write(macro_text)
+        result += f"\n\nSaved to {out_path}"
+
+    return result
+
+
+def tool_generate_run(samples: list, xas_macro: str = None,
+                      save: bool = False, filename: str = "run.mac", **kw) -> str:
+    if xas_macro is None:
+        xas_macro = "element_xas"
+
+    try:
+        run_text = hu.generate_run_macro(samples, xas_macro=xas_macro)
+    except Exception as e:
+        return f"Error: {e}"
+
+    result = f"Generated batch run macro ({len(samples)} samples):\n\n```\n{run_text}\n```"
+
+    if save:
+        if not filename.endswith(".mac"):
+            filename += ".mac"
+        out_dir = hu.ensure_export_dir("macros")
+        out_path = os.path.join(out_dir, filename)
+        with open(out_path, "w") as f:
+            f.write(run_text)
+        result += f"\n\nSaved to {out_path}"
+
+    return result
+
+
+def tool_show_macro(filename: str, **kw) -> str:
+    # Search in data dir and current dir
+    for search_dir in [DATA_DIR, "."]:
+        path = os.path.join(search_dir, filename)
+        if os.path.isfile(path):
+            with open(path, "r") as f:
+                content = f.read()
+            return f"Contents of {filename}:\n\n```\n{content}\n```"
+
+    # Also check exported macros
+    path = os.path.join(EXPORT_DIR, "macros", filename)
+    if os.path.isfile(path):
+        with open(path, "r") as f:
+            content = f.read()
+        return f"Contents of {filename}:\n\n```\n{content}\n```"
+
+    return f"File not found: {filename}"
+
+
+def tool_list_macros(**kw) -> str:
+    mac_files = []
+    for search_dir in [DATA_DIR, "."]:
+        for f in glob.glob(os.path.join(search_dir, "*.mac")):
+            mac_files.append(f)
+    # Also check exported macros
+    macro_dir = os.path.join(EXPORT_DIR, "macros")
+    if os.path.isdir(macro_dir):
+        for f in glob.glob(os.path.join(macro_dir, "*.mac")):
+            mac_files.append(f)
+
+    if not mac_files:
+        return "No .mac files found."
+
+    lines = ["Macro files:"]
+    for f in sorted(mac_files):
+        size = os.path.getsize(f)
+        lines.append(f"  📄 {os.path.basename(f)} ({size} bytes) — {f}")
+    return "\n".join(lines)
+
+
 def tool_list_exports(**kw) -> str:
     if not os.path.isdir(EXPORT_DIR):
         return "No exported_data directory found."
@@ -1129,6 +1305,10 @@ TOOL_DISPATCH = {
     "save_image": tool_save_image,
     "process_all": tool_process_all,
     "plot_file": tool_plot_file,
+    "generate_macro": tool_generate_macro,
+    "generate_run": tool_generate_run,
+    "show_macro": tool_show_macro,
+    "list_macros": tool_list_macros,
     "list_exports": tool_list_exports,
 }
 
@@ -1189,6 +1369,10 @@ Rules:
 - When the user asks "what element" or "identify element" or "what edge", use identify_element
 - When first loading data, consider using identify_element to determine the element being measured
 - If the element is guessed from energy (not metadata), ask the user to confirm
+- When the user asks to "create a macro", "generate a macro", or "make a scan macro", use generate_macro
+- When the user asks to "create a run file", "batch run", or "set up measurements", use generate_run
+- When the user asks to "show macro" or "view macro", use show_macro
+- When the user asks to "list macros", use list_macros
 - When the user says "save", use save_data or save_image as appropriate
 - Be helpful and concise
 - If the request is ambiguous, make a reasonable assumption and explain what you did

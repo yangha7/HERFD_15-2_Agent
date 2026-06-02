@@ -1054,6 +1054,250 @@ def get_plot_data(
 
 
 # ---------------------------------------------------------------------------
+# Macro Generation for SPEC
+# ---------------------------------------------------------------------------
+
+def generate_energy_grid(element: str, edge: str = "K",
+                         pre_edge_start: float = -50,
+                         xanes_step: float = 0.3,
+                         exafs_end: float = 500) -> str:
+    """Generate a gscan energy grid string for a given element and edge.
+
+    Creates a multi-region grid with fine steps near the edge and coarser
+    steps in the pre-edge and post-edge regions.
+
+    Parameters
+    ----------
+    element : str
+        Element symbol (e.g. 'Ru', 'Fe', 'Pt').
+    edge : str
+        Edge name (e.g. 'K', 'L3', 'L2'). Default 'K'.
+    pre_edge_start : float
+        Start of pre-edge region relative to E0 (eV). Default -50.
+    xanes_step : float
+        Step size in the XANES region (eV). Default 0.3.
+    exafs_end : float
+        End of scan relative to E0 (eV). Default 500.
+
+    Returns
+    -------
+    str : gscan energy grid string (e.g. "22070 22100 2 22110 1 ...")
+    """
+    # Look up edge energy
+    if element not in XAS_EDGE_DB:
+        raise ValueError(f"Element '{element}' not in database. "
+                         f"Available: {sorted(XAS_EDGE_DB.keys())}")
+    edges = XAS_EDGE_DB[element]
+    if edge not in edges:
+        raise ValueError(f"Edge '{edge}' not available for {element}. "
+                         f"Available: {list(edges.keys())}")
+    e0 = edges[edge]
+
+    # Build energy grid regions
+    e_start = int(e0 + pre_edge_start)
+    regions = []
+
+    # Start energy
+    regions.append(f"{e_start}")
+
+    # Pre-edge: coarse (2 eV steps)
+    pre_end = int(e0 - 20)
+    regions.append(f"{pre_end} 2")
+
+    # Approaching edge: medium (1 eV steps)
+    approach_end = int(e0 - 7)
+    regions.append(f"{approach_end} 1")
+
+    # Edge region: fine (xanes_step eV)
+    edge_end = round(e0 + 10, 1)
+    regions.append(f"{edge_end} {xanes_step}")
+
+    # Near-edge / white line: medium-fine (0.5 eV)
+    near_end = round(e0 + 30, 1)
+    regions.append(f"{near_end} 0.5")
+
+    # Post-edge XANES: medium (1 eV)
+    post_xanes_end = round(e0 + 80, 1)
+    regions.append(f"{post_xanes_end} 1")
+
+    # Extended post-edge: coarse (4 eV)
+    ext_end = round(e0 + 200, 1)
+    regions.append(f"{ext_end} 4")
+
+    # Far post-edge: very coarse (10 eV)
+    far_end = round(e0 + exafs_end, 1)
+    regions.append(f"{far_end} 10")
+
+    return " ".join(regions)
+
+
+def generate_xas_macro(element: str, edge: str = "K",
+                       macro_name: str = None,
+                       count_time: float = 1.0,
+                       xanes_step: float = 0.3,
+                       pre_edge_start: float = -50,
+                       exafs_end: float = 500,
+                       include_exafs: bool = False) -> str:
+    """Generate a SPEC macro for XAS data collection.
+
+    Parameters
+    ----------
+    element : str
+        Element symbol.
+    edge : str
+        Edge name. Default 'K'.
+    macro_name : str or None
+        Name for the macro function. Default: '{element}_xas'.
+    count_time : float
+        Default counting time per point (seconds).
+    xanes_step : float
+        Step size in XANES region (eV).
+    pre_edge_start : float
+        Pre-edge start relative to E0 (eV).
+    exafs_end : float
+        End of scan relative to E0 (eV).
+    include_exafs : bool
+        If True, also generate an EXAFS macro.
+
+    Returns
+    -------
+    str : Complete SPEC macro text.
+    """
+    if macro_name is None:
+        macro_name = f"{element}_xas"
+
+    e0 = XAS_EDGE_DB[element][edge]
+    grid = generate_energy_grid(element, edge, pre_edge_start, xanes_step, exafs_end)
+
+    SQ = "'"  # single quote for SPEC macro syntax
+
+    lines = []
+    lines.append(f"# {macro_name} cntSec  nbrScan  emission  nbrFilter")
+    lines.append(f"# Element: {element}, Edge: {edge}, E0 = {e0:.1f} eV")
+    lines.append(f"def {macro_name} {SQ}{{")
+    lines.append(f"    local scan_ctime scan_repeat")
+    lines.append(f"    local ndx nbrFilter")
+    lines.append(f"    global XAS_MAIN_GRID")
+    lines.append(f"    local  arr_tmp xas_start")
+    lines.append(f"")
+    lines.append(f'    XAS_MAIN_GRID  = "{grid}"')
+    lines.append(f"")
+    lines.append(f'    split(XAS_MAIN_GRID, arr_tmp)')
+    lines.append(f'    xas_start = arr_tmp["0"]')
+    lines.append(f"")
+    lines.append(f"    if ($# < 4) {{")
+    lines.append(f'        printf("\\n\\nSyntax:\\n")')
+    lines.append(f'        printf("    {macro_name}  cntSec  nbrScan  emission  nbrFilter\\n\\n")')
+    lines.append(f"        return")
+    lines.append(f"    }}")
+    lines.append(f"    if ( $1 <= 0) {{")
+    lines.append(f'        print "Counting time needs to be non-zero positive."')
+    lines.append(f'        print "Default {count_time} sec is used now."')
+    lines.append(f"        scan_ctime = {count_time}")
+    lines.append(f"    }} else {{")
+    lines.append(f"        scan_ctime = $1")
+    lines.append(f"    }}")
+    lines.append(f"    if ( $2 == 0) {{")
+    lines.append(f"        scan_repeat = 1")
+    lines.append(f"    }} else {{")
+    lines.append(f"        scan_repeat = $2")
+    lines.append(f"    }}")
+    lines.append(f"    if ( $3 == 0 ) {{")
+    lines.append(f'        printf("Emission energy stays at %f eV\\n", A[emiss])')
+    lines.append(f"    }} else {{")
+    lines.append(f'        printf("Moving emission energy to %f eV\\n", $3)')
+    lines.append(f'        eval(sprintf("mv emiss %f",$3))')
+    lines.append(f"    }}")
+    lines.append(f"    if ( $4 >= 0 ) {{")
+    lines.append(f'        printf("FILTER=%d will be applied for the scan.\\n",$4)')
+    lines.append(f"        nbrFilter = $4")
+    lines.append(f"    }} else {{")
+    lines.append(f'        printf("\\n!!!!!! Error !!!!!!\\n")')
+    lines.append(f'        printf("Number of filter needs to be positive.\\n")')
+    lines.append(f"        return")
+    lines.append(f"    }}")
+    lines.append(f"    for (ndx=0; ndx< scan_repeat; ndx++) {{")
+    lines.append(f'        eval(sprintf("umv energy %f",xas_start))')
+    lines.append(f'        eval(sprintf("mv filter %d",nbrFilter))')
+    lines.append(f"        sleep(0.25)")
+    lines.append(f'        eval(sprintf("gscan energy %s %f", XAS_MAIN_GRID, scan_ctime))')
+    lines.append(f"    }}")
+    lines.append(f"}}{SQ}")
+
+    if include_exafs:
+        e_start = int(e0 - 70)
+        lines.append(f"")
+        lines.append(f"")
+        lines.append(f"def {element}_exafs {SQ}{{")
+        lines.append(f"# EXAFS scan for {element} {edge}-edge (E0 = {e0:.1f} eV)")
+        lines.append(f"# Usage: kscan_energy start0 step1 sec1 end1 [...] E0 k1 kstep k2 ksec1 ksec2 kweight")
+        lines.append(f"        umv energy {e_start}")
+        lines.append(f"        kscan_energy {e_start} 2 1 {int(e0-20)} 1.0 1 {int(e0-7)} 0.3 1 {int(e0+10)} 0.5 1 {int(e0+20)} {e0:.0f} 1.0 0.05 14 1 15 2")
+        lines.append(f"}}{SQ}")
+
+    return "\n".join(lines)
+
+
+def generate_run_macro(samples: list, xas_macro: str = "Ru_xas") -> str:
+    """Generate a batch run macro for multiple samples.
+
+    Parameters
+    ----------
+    samples : list of dict
+        Each dict should have:
+            name : str - sample/file name
+            Sx, Sy, Sz, Sr : float - motor positions
+            emiss : float - emission energy (eV)
+            count_time : float - counting time per point (sec)
+            n_scans : int - number of repeat scans
+            filter : int - number of filters (default 0)
+            geometry : str - 'grazing' or 'normal' (optional)
+    xas_macro : str
+        Name of the XAS macro to call.
+
+    Returns
+    -------
+    str : Complete run macro text.
+    """
+    lines = [f"# Batch run macro generated by HERFD Agent",
+             f"# XAS macro: {xas_macro}",
+             f"# Samples: {len(samples)}",
+             ""]
+
+    for i, s in enumerate(samples):
+        name = s.get("name", f"sample_{i+1}")
+        geometry = s.get("geometry", "")
+        lines.append("######################################")
+        lines.append(f"# Sample {i+1}: {name}" + (f" ({geometry})" if geometry else ""))
+        lines.append(f"newfile {name}")
+        lines.append("")
+
+        # Motor positions
+        sx = s.get("Sx", 0)
+        sy = s.get("Sy", 0)
+        sz = s.get("Sz", 0)
+        sr = s.get("Sr", 0)
+        lines.append(f"umv Sx {sx} Sy {sy} Sz {sz} Sr {sr}")
+
+        # Emission energy
+        emiss = s.get("emiss", 0)
+        if emiss:
+            lines.append(f"umv emiss {emiss}")
+
+        lines.append("")
+
+        # XAS scan
+        ct = s.get("count_time", 1)
+        ns = s.get("n_scans", 4)
+        filt = s.get("filter", 0)
+        emiss_arg = s.get("emission_arg", 0)
+        lines.append(f"#{xas_macro}  cntSec  nbrScan  emission  nbrFilter")
+        lines.append(f"{xas_macro} {ct} {ns} {emiss_arg} {filt}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+# ---------------------------------------------------------------------------
 # Main entry point for command-line usage
 # ---------------------------------------------------------------------------
 
