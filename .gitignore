@@ -6,6 +6,12 @@
 *_Data/
 *.dat
 
+# ── Example data (tracked) ───────────────────────────────────────────────
+!example_data/**
+
+# ── Documentation figures (tracked) ─────────────────────────────────────
+!docs/**
+
 # ── Generated output ────────────────────────────────────────────────────────
 exported_data/
 exp_info/

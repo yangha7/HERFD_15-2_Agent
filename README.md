@@ -16,6 +16,17 @@ Talk to your data in natural language — plot spectra, compare samples, normali
 - **Plotting** — Inline plots with zoom (x and y axis), auto-scaling, offset stacking, and custom styling
 - **Batch Processing** — Process all samples at once (average + normalize + export)
 
+## Example: RuO₂ Reference (Ru K-edge)
+
+### Raw Individual Scans
+![Raw Scans](docs/raw_scans.png)
+
+### Averaged Spectrum
+![Averaged](docs/averaged.png)
+
+### Normalized HERFD-XANES
+![Normalized](docs/normalized.png)
+
 ## Supported Data
 
 - **Format**: SPEC-format `.dat` files (standard at SSRL)
@@ -135,7 +146,36 @@ candidates = hu.identify_element_from_energy((energy.min(), energy.max()), "RuO2
 ├── requirements.txt     # Python dependencies
 ├── .env.example         # LLM API key template
 ├── .gitignore           # Git exclusions
-└── README.md            # This file
+├── README.md            # This file
+├── docs/                # Documentation figures
+│   ├── raw_scans.png
+│   ├── averaged.png
+│   └── normalized.png
+└── example_data/        # Example RuO₂ reference data (Ru K-edge)
+    ├── 20260521_RuO2_Ref_dir/
+    │   ├── 20260521_RuO2_Ref_001.dat
+    │   └── 20260521_RuO2_Ref_002.dat
+    └── exported/
+        ├── averaged/
+        │   └── 20260521_RuO2_Ref_avg.dat
+        └── normalized/
+            └── 20260521_RuO2_Ref_norm.dat
+```
+
+## Try with Example Data
+
+The repo includes RuO₂ powder reference data (Ru K-edge) so you can test immediately:
+
+```bash
+# Set data dir to example_data
+export HERFD_DATA_DIR=example_data
+
+# Run the CLI
+python herfd_utils.py --summary
+python herfd_utils.py --process-all
+
+# Or start the agent
+python run_agent.py
 ```
 
 ## Normalization Details
