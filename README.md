@@ -151,6 +151,3 @@ The XANES normalization follows the **Athena-style** approach:
 
 The **flattened** spectrum (`mu_flat`) is used by default, which is important for hard X-ray data with wide energy ranges where the raw normalized spectrum shows natural post-edge decay.
 
-## License
-
-MIT
