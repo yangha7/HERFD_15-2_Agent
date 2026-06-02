@@ -15,6 +15,8 @@ Talk to your data in natural language — plot spectra, compare samples, normali
 - **Command History** — Up/down arrow keys to recall previous commands
 - **Plotting** — Inline plots with zoom (x and y axis), auto-scaling, offset stacking, and custom styling
 - **Batch Processing** — Process all samples at once (average + normalize + export)
+- **Macro Generation** — Create SPEC scan macros for any element/edge with optimized energy grids
+- **Batch Run Scripts** — Generate run files for automated multi-sample data collection
 
 ## Example: RuO₂ Reference (Ru K-edge)
 
@@ -161,6 +163,89 @@ candidates = hu.identify_element_from_energy((energy.min(), energy.max()), "RuO2
         └── normalized/
             └── 20260521_RuO2_Ref_norm.dat
 ```
+
+## Macro Generation
+
+The agent can generate SPEC macros for data collection at BL 15-2. It automatically creates optimized energy grids for any element and edge.
+
+### Chat Examples
+
+- **"Generate a macro for Fe K-edge"** — Creates a complete SPEC macro with energy grid around 7112 eV
+- **"Create a Pt L3-edge macro with 0.2 eV steps and EXAFS"** — Fine XANES + EXAFS scan
+- **"Make a run file for 3 samples at Sz=2, 19.5, 33.5"** — Batch run script
+
+### Python API
+
+```python
+import herfd_utils as hu
+
+# Generate energy grid for Fe K-edge
+grid = hu.generate_energy_grid("Fe", "K")
+# "7062 7092 2 7105 1 7122.0 0.3 7142.0 0.5 7192.0 1 7312.0 4 7612.0 10"
+
+# Generate complete SPEC macro
+macro = hu.generate_xas_macro("Fe", "K", count_time=1, xanes_step=0.3)
+```
+
+### Example: Generated Fe K-edge Macro
+
+The energy grid is automatically optimized with multiple regions:
+
+| Region | Energy Range (eV) | Step (eV) | Purpose |
+|--------|-------------------|-----------|---------|
+| 7062 → 7092 | 2.0 | Pre-edge (coarse) |
+| 7092 → 7105 | 1.0 | Approaching edge |
+| 7105 → 7122 | 0.3 | **Edge region** (fine) |
+| 7122 → 7142 | 0.5 | Near-edge / white line |
+| 7142 → 7192 | 1.0 | Post-edge XANES |
+| 7192 → 7312 | 4.0 | Extended post-edge |
+| 7312 → 7612 | 10.0 | Far post-edge |
+
+<details>
+<summary>Click to see the full generated macro</summary>
+
+```
+# Fe_xas cntSec  nbrScan  emission  nbrFilter
+# Element: Fe, Edge: K, E0 = 7112.0 eV
+def Fe_xas '{
+    local scan_ctime scan_repeat
+    local ndx nbrFilter
+    global XAS_MAIN_GRID
+    local  arr_tmp xas_start
+
+    XAS_MAIN_GRID  = "7062 7092 2 7105 1 7122.0 0.3 7142.0 0.5 7192.0 1 7312.0 4 7612.0 10"
+
+    split(XAS_MAIN_GRID, arr_tmp)
+    xas_start = arr_tmp["0"]
+
+    if ($# < 4) {
+        printf("\n\nSyntax:\n")
+        printf("    Fe_xas  cntSec  nbrScan  emission  nbrFilter\n\n")
+        return
+    }
+    ...
+    for (ndx=0; ndx< scan_repeat; ndx++) {
+        eval(sprintf("umv energy %f",xas_start))
+        eval(sprintf("mv filter %d",nbrFilter))
+        sleep(0.25)
+        eval(sprintf("gscan energy %s %f", XAS_MAIN_GRID, scan_ctime))
+    }
+}'
+```
+
+</details>
+
+### Supported Elements (4.5–37 keV)
+
+| Category | Elements | Edge |
+|----------|----------|------|
+| 3d metals | Ti, V, Cr, Mn, Fe, Co, Ni, Cu, Zn | K |
+| 4d metals | Zr, Nb, Mo, Tc, Ru, Rh, Pd, Ag, Cd | K |
+| 5d metals | Hf, Ta, W, Re, Os, Ir, Pt, Au | L₃, L₂ |
+| Lanthanides | La, Ce, Pr, Nd, Sm, Eu, Gd, Tb, Dy, Ho, Er, Yb | L₃, L₂ |
+| Actinides | Th, U, Np, Pu | L₃ |
+| Others | Ga, Ge, As, Se, Br, Sr, Y | K |
+
 
 ## Try with Example Data
 
