@@ -17,6 +17,8 @@ Talk to your data in natural language — plot spectra, compare samples, normali
 - **Batch Processing** — Process all samples at once (average + normalize + export)
 - **Macro Generation** — Create SPEC scan macros for any element/edge with optimized energy grids
 - **Batch Run Scripts** — Generate run files for automated multi-sample data collection
+- **EXAFS Processing** — Background removal, chi(k) extraction, and Fourier transform to |chi(R)|
+- **EXAFS FFT Comparison** — Compare radial distribution functions across samples
 
 ## Example: RuO₂ Reference (Ru K-edge)
 
@@ -100,6 +102,8 @@ Type natural language commands in the chat:
 - **"Process all samples"** — Batch average + normalize + export
 - **"Zoom in from 22110 to 22150 eV"** — Energy range zoom
 - **"Set y axis from 0 to 1.5"** — Y-axis range control
+- **"Plot EXAFS for RuO2_Ref"** — EXAFS chi(k) in k-space
+- **"Show FFT of 110_normal"** — Fourier transform |chi(R)|
 
 ### Command-Line Interface
 
@@ -163,6 +167,57 @@ candidates = hu.identify_element_from_energy((energy.min(), energy.max()), "RuO2
         └── normalized/
             └── 20260521_RuO2_Ref_norm.dat
 ```
+
+## EXAFS Processing
+
+The agent includes a complete EXAFS processing pipeline:
+
+1. **Background removal** — Simplified Autobk algorithm using cubic spline fitting
+2. **chi(k) extraction** — Normalized EXAFS oscillations in k-space
+3. **Fourier transform** — FFT with configurable window functions (Hanning, Kaiser, Sine)
+
+### Chat Examples
+
+- **"Plot EXAFS for RuO2_Ref"** — Shows k²·χ(k) 
+- **"Show FFT of 110_normal"** — Plots |χ(R)| with peak positions
+- **"Compare FFT of 100_normal, 110_normal, 111_normal"** — Overlay radial distributions
+- **"Plot EXAFS FFT with kweight=3 and kmax=12"** — Custom parameters
+
+### Python API
+
+```python
+import herfd_utils as hu
+
+# Load and average
+energy, mu, files = hu.average_sample_dir("2026-05_Yano/20260521_RuO2_Ref_dir")
+
+# Full EXAFS pipeline
+result = hu.process_exafs(energy, mu, kmin=2.0, kmax=10, kweight=2)
+
+# Access results
+k = result["k"]           # k in Angstrom^-1
+chi = result["chi"]       # chi(k)
+r = result["r"]           # R in Angstrom
+chir_mag = result["chir_mag"]  # |chi(R)|
+
+# Or step by step:
+bkg = hu.autobk_background(energy, mu, e0=22132.7, rbkg=1.0)
+ft = hu.xftf(bkg["k"], bkg["chi"], kmin=2, kmax=10, kweight=2, window="hanning")
+```
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `kmin` | 2.0 | Minimum k for FT window (Å⁻¹) |
+| `kmax` | auto | Maximum k (from data range) |
+| `kweight` | 2 | k-weighting power (0, 1, 2, or 3) |
+| `dk` | 1.0 | Window edge width (Å⁻¹) |
+| `window` | hanning | Window function (hanning, kaiser, sine) |
+| `rbkg` | 1.0 | Background R cutoff (Å) |
+| `rmax` | 6.0 | Maximum R to display (Å) |
+
+> **Note:** R values from the FFT are phase-uncorrected. Real bond distances are typically 0.3–0.5 Å longer than the FFT peak positions.
 
 ## Macro Generation
 
