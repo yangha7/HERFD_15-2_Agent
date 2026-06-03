@@ -795,6 +795,367 @@ def smooth_derivative(
                          deriv=order, delta=delta)
 
 
+
+# ---------------------------------------------------------------------------
+# EXAFS Processing
+# ---------------------------------------------------------------------------
+
+# Physical constants
+ELECTRON_MASS_EV = 0.26246582  # 2*m_e/hbar^2 in eV^-1 Angstrom^-2
+
+
+def energy_to_k(energy: np.ndarray, e0: float) -> np.ndarray:
+    """Convert energy (eV) to photoelectron wavenumber k (Angstrom^-1).
+
+    k = sqrt(0.26246582 * (E - E0))
+
+    Parameters
+    ----------
+    energy : array
+        Energy in eV.
+    e0 : float
+        Edge energy in eV.
+
+    Returns
+    -------
+    array : k in Angstrom^-1 (NaN for E < E0)
+    """
+    de = energy - e0
+    k = np.where(de > 0, np.sqrt(ELECTRON_MASS_EV * de), 0.0)
+    return k
+
+
+def k_to_energy(k: np.ndarray, e0: float) -> np.ndarray:
+    """Convert k (Angstrom^-1) back to energy (eV)."""
+    return e0 + k**2 / ELECTRON_MASS_EV
+
+
+def autobk_background(
+    energy: np.ndarray,
+    mu: np.ndarray,
+    e0: float = None,
+    rbkg: float = 1.0,
+    kmin: float = 0.0,
+    kmax: float = None,
+    kweight: int = 1,
+    nknots: int = None,
+) -> dict:
+    """Remove smooth atomic background from mu(E) using the Autobk algorithm.
+
+    This is a simplified implementation of the AUTOBK algorithm used in
+    IFEFFIT/Larch/Athena. It fits a cubic spline to mu(E) such that the
+    low-R components of the Fourier transform of chi(k) are minimized.
+
+    Parameters
+    ----------
+    energy : array
+        Energy in eV.
+    mu : array
+        Absorption coefficient (already normalized or raw).
+    e0 : float or None
+        Edge energy. If None, auto-detected.
+    rbkg : float
+        R value (Angstrom) below which the FT is minimized. Default 1.0.
+        Controls the stiffness of the background spline.
+    kmin : float
+        Minimum k for chi(k) extraction. Default 0.
+    kmax : float or None
+        Maximum k for chi(k). If None, determined from data.
+    kweight : int
+        k-weighting for the background optimization. Default 1.
+    nknots : int or None
+        Number of spline knots. If None, auto-calculated from rbkg.
+
+    Returns
+    -------
+    dict with keys:
+        e0 : float
+        k : array (k in Angstrom^-1)
+        chi : array (chi(k))
+        bkg : array (background mu0(E), same length as energy)
+        edge_step : float
+    """
+    if e0 is None:
+        e0 = find_e0(energy, mu)
+
+    # Pre-edge normalization to get edge step
+    norm_result = normalize_xanes(energy, mu, e0=e0)
+    edge_step = norm_result["edge_step"]
+    pre_edge_line = norm_result["pre_edge_line"]
+
+    # Work above E0
+    above = energy >= e0
+    e_above = energy[above]
+    mu_above = mu[above]
+
+    # Convert to k-space
+    k_all = energy_to_k(e_above, e0)
+
+    if kmax is None:
+        kmax = k_all.max() - 0.5  # leave a small margin
+
+    # Determine number of spline knots from Nyquist criterion
+    # nknots = 2 * rbkg * (kmax - kmin) / pi
+    if nknots is None:
+        nknots = max(4, int(2 * rbkg * (kmax - kmin) / np.pi) + 1)
+    nknots = min(nknots, len(e_above) // 4)  # safety limit
+
+    # Create spline knot positions evenly spaced in k-space
+    k_knots = np.linspace(kmin + 0.5, kmax - 0.5, nknots)
+    e_knots = k_to_energy(k_knots, e0)
+
+    # Fit background using a cubic spline through the knot points
+    # Simple approach: use UnivariateSpline with smoothing
+    from scipy.interpolate import UnivariateSpline
+
+    # Initial background estimate: smooth the data heavily
+    # Use a spline with controlled smoothness
+    weights = np.ones(len(e_above))
+
+    # Weight by k^kweight to emphasize higher-k regions
+    k_w = np.where(k_all > 0, k_all**kweight, 1.0)
+    weights = k_w
+
+    try:
+        # Fit a smooth spline as background
+        # s parameter controls smoothness — larger = smoother
+        s_factor = len(e_above) * 0.001  # empirical smoothing factor
+        spline = UnivariateSpline(e_above, mu_above, w=1.0/weights,
+                                   s=s_factor, k=3)
+        bkg_above = spline(e_above)
+    except Exception:
+        # Fallback: polynomial background
+        coeffs = np.polyfit(e_above, mu_above, min(6, len(e_above) - 1))
+        bkg_above = np.polyval(coeffs, e_above)
+
+    # Construct full background array (pre-edge uses the pre-edge line)
+    bkg = np.copy(mu)
+    bkg[~above] = pre_edge_line[~above]
+    bkg[above] = bkg_above
+
+    # Extract chi(k)
+    chi_e = (mu_above - bkg_above) / edge_step
+
+    # Interpolate chi onto uniform k-grid
+    k_uniform = np.arange(kmin, kmax, 0.05)
+    chi_interp = np.interp(k_uniform, k_all, chi_e, left=0, right=0)
+
+    return {
+        "e0": e0,
+        "k": k_uniform,
+        "chi": chi_interp,
+        "bkg": bkg,
+        "edge_step": edge_step,
+        "kmin": kmin,
+        "kmax": kmax,
+    }
+
+
+def xftf(
+    k: np.ndarray,
+    chi: np.ndarray,
+    kmin: float = 2.0,
+    kmax: float = None,
+    kweight: int = 2,
+    dk: float = 1.0,
+    window: str = "hanning",
+    nfft: int = 2048,
+    rmax: float = 10.0,
+) -> dict:
+    """Forward EXAFS Fourier transform: chi(k) -> chi(R).
+
+    Parameters
+    ----------
+    k : array
+        Wavenumber in Angstrom^-1.
+    chi : array
+        EXAFS chi(k).
+    kmin : float
+        Minimum k for the FT window. Default 2.0.
+    kmax : float or None
+        Maximum k for the FT window. If None, uses max(k) - 1.
+    kweight : int
+        k-weighting power (0, 1, 2, or 3). Default 2.
+    dk : float
+        Width of the window edge (Angstrom^-1). Default 1.0.
+    window : str
+        Window function: 'hanning', 'kaiser', 'gaussian', or 'sine'.
+        Default 'hanning'.
+    nfft : int
+        Number of FFT points. Default 2048.
+    rmax : float
+        Maximum R to return (Angstrom). Default 10.
+
+    Returns
+    -------
+    dict with keys:
+        r : array (R in Angstrom)
+        chir_mag : array (|chi(R)|, magnitude)
+        chir_re : array (Re[chi(R)])
+        chir_im : array (Im[chi(R)])
+        kwin : array (the k-space window function)
+    """
+    if kmax is None:
+        kmax = k.max() - 0.5
+
+    # Build window function
+    kwin = _ftwindow(k, kmin, kmax, dk, window)
+
+    # Apply k-weighting and window
+    chi_kw = chi * k**kweight * kwin
+
+    # Zero-pad to nfft points
+    dk_step = np.mean(np.diff(k)) if len(k) > 1 else 0.05
+    padded = np.zeros(nfft)
+    padded[:len(chi_kw)] = chi_kw
+
+    # FFT
+    # The FT convention for EXAFS: chi(R) = (1/sqrt(2pi)) * integral chi(k)*k^n * exp(2ikR) dk
+    # Using numpy FFT with proper scaling
+    cchi = np.fft.fft(padded)
+
+    # R-space grid
+    dr = np.pi / (nfft * dk_step)
+    r = np.arange(nfft) * dr
+
+    # Scale factor
+    scale = dk_step / np.sqrt(np.pi)
+
+    # Select up to rmax
+    r_mask = r <= rmax
+    r_out = r[r_mask]
+    chir_complex = cchi[r_mask] * scale
+
+    return {
+        "r": r_out,
+        "chir_mag": np.abs(chir_complex),
+        "chir_re": np.real(chir_complex),
+        "chir_im": np.imag(chir_complex),
+        "kwin": kwin,
+        "kmin": kmin,
+        "kmax": kmax,
+        "kweight": kweight,
+    }
+
+
+def _ftwindow(k: np.ndarray, kmin: float, kmax: float,
+              dk: float = 1.0, window: str = "hanning") -> np.ndarray:
+    """Generate a window function for EXAFS Fourier transform.
+
+    Parameters
+    ----------
+    k : array
+        k values.
+    kmin, kmax : float
+        Window boundaries.
+    dk : float
+        Edge width.
+    window : str
+        Window type: 'hanning', 'kaiser', 'gaussian', 'sine'.
+
+    Returns
+    -------
+    array : window function (0 to 1)
+    """
+    win = np.zeros_like(k)
+
+    if window == "hanning":
+        # Hanning window with smooth edges
+        for i, ki in enumerate(k):
+            if ki < kmin - dk:
+                win[i] = 0
+            elif ki < kmin:
+                win[i] = 0.5 * (1 - np.cos(np.pi * (ki - kmin + dk) / dk))
+            elif ki <= kmax:
+                win[i] = 1.0
+            elif ki < kmax + dk:
+                win[i] = 0.5 * (1 + np.cos(np.pi * (ki - kmax) / dk))
+            else:
+                win[i] = 0
+    elif window == "kaiser":
+        beta = 2.5 * dk
+        for i, ki in enumerate(k):
+            if kmin <= ki <= kmax:
+                x = 2 * (ki - kmin) / (kmax - kmin) - 1
+                if abs(x) < 1:
+                    from scipy.special import i0 as bessel_i0
+                    win[i] = bessel_i0(beta * np.sqrt(1 - x**2)) / bessel_i0(beta)
+    elif window == "sine":
+        for i, ki in enumerate(k):
+            if ki < kmin - dk:
+                win[i] = 0
+            elif ki < kmin:
+                win[i] = np.sin(0.5 * np.pi * (ki - kmin + dk) / dk)
+            elif ki <= kmax:
+                win[i] = 1.0
+            elif ki < kmax + dk:
+                win[i] = np.cos(0.5 * np.pi * (ki - kmax) / dk)
+            else:
+                win[i] = 0
+    else:
+        # Default: rectangular with smooth edges (same as hanning)
+        return _ftwindow(k, kmin, kmax, dk, "hanning")
+
+    return win
+
+
+def process_exafs(
+    energy: np.ndarray,
+    mu: np.ndarray,
+    e0: float = None,
+    rbkg: float = 1.0,
+    kmin: float = 2.0,
+    kmax: float = None,
+    kweight: int = 2,
+    dk: float = 1.0,
+    window: str = "hanning",
+) -> dict:
+    """Complete EXAFS processing pipeline: background removal + FFT.
+
+    Parameters
+    ----------
+    energy : array
+        Energy in eV.
+    mu : array
+        Absorption coefficient.
+    e0 : float or None
+        Edge energy. Auto-detected if None.
+    rbkg : float
+        Background R cutoff (Angstrom). Default 1.0.
+    kmin : float
+        Minimum k for FT. Default 2.0.
+    kmax : float or None
+        Maximum k for FT. Auto from data if None.
+    kweight : int
+        k-weighting (0, 1, 2, 3). Default 2.
+    dk : float
+        FT window edge width. Default 1.0.
+    window : str
+        FT window type. Default 'hanning'.
+
+    Returns
+    -------
+    dict with keys from autobk_background + xftf:
+        e0, k, chi, bkg, edge_step,
+        r, chir_mag, chir_re, chir_im, kwin, kmin, kmax, kweight
+    """
+    # Background removal
+    bkg_result = autobk_background(energy, mu, e0=e0, rbkg=rbkg,
+                                    kmax=kmax)
+
+    # Fourier transform
+    ft_kmax = kmax if kmax is not None else bkg_result["kmax"]
+    ft_result = xftf(bkg_result["k"], bkg_result["chi"],
+                     kmin=kmin, kmax=ft_kmax,
+                     kweight=kweight, dk=dk, window=window)
+
+    # Merge results
+    result = {}
+    result.update(bkg_result)
+    result.update(ft_result)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------

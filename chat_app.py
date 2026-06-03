@@ -475,6 +475,66 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "plot_exafs",
+            "description": "Process and plot EXAFS chi(k) for a sample. Extracts the EXAFS oscillations from the averaged spectrum by removing the smooth atomic background.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sample": {"type": "string", "description": "Sample name or partial match."},
+                    "kmin": {"type": "number", "description": "Minimum k (Angstrom^-1). Default 0."},
+                    "kmax": {"type": "number", "description": "Maximum k (Angstrom^-1). Auto if not given."},
+                    "kweight": {"type": "integer", "description": "k-weighting power (0,1,2,3). Default 2."},
+                    "title": {"type": "string", "description": "Custom plot title."},
+                },
+                "required": ["sample"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "plot_exafs_fft",
+            "description": "Process EXAFS and plot the Fourier transform |chi(R)| for a sample. Shows the radial distribution function (bond distances).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sample": {"type": "string", "description": "Sample name or partial match."},
+                    "kmin": {"type": "number", "description": "Minimum k for FT window (Angstrom^-1). Default 2."},
+                    "kmax": {"type": "number", "description": "Maximum k for FT window. Auto if not given."},
+                    "kweight": {"type": "integer", "description": "k-weighting (0,1,2,3). Default 2."},
+                    "rmax": {"type": "number", "description": "Maximum R to plot (Angstrom). Default 6."},
+                    "dk": {"type": "number", "description": "FT window edge width. Default 1."},
+                    "window": {"type": "string", "enum": ["hanning", "kaiser", "sine"], "description": "FT window function. Default hanning."},
+                    "title": {"type": "string", "description": "Custom plot title."},
+                },
+                "required": ["sample"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_exafs_fft",
+            "description": "Compare EXAFS Fourier transforms |chi(R)| from multiple samples on one plot.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "samples": {"type": "array", "items": {"type": "string"}, "description": "List of sample names."},
+                    "kmin": {"type": "number", "description": "Minimum k for FT. Default 2."},
+                    "kmax": {"type": "number", "description": "Maximum k for FT. Auto if not given."},
+                    "kweight": {"type": "integer", "description": "k-weighting. Default 2."},
+                    "rmax": {"type": "number", "description": "Maximum R to plot. Default 6."},
+                    "offset": {"type": "number", "description": "Vertical offset between curves. Default 0."},
+                    "labels": {"type": "array", "items": {"type": "string"}, "description": "Custom legend labels."},
+                    "title": {"type": "string", "description": "Custom plot title."},
+                },
+                "required": ["samples"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_macro",
             "description": "Generate a SPEC XAS scan macro for a specific element and edge. Creates the energy grid and macro function automatically. The macro can be saved to a .mac file.",
             "parameters": {
@@ -1177,6 +1237,147 @@ def tool_plot_file(filepath: str, e_min: float = None, e_max: float = None,
     return f"Plotted {os.path.basename(filepath)} ({len(x[mask])} pts)."
 
 
+def tool_plot_exafs(sample: str, kmin: float = 0, kmax: float = None,
+                    kweight: int = 2, title: str = None, **kw) -> str:
+    global _last_plot, _last_plot_b64
+    try:
+        dir_path = _resolve_sample(sample)
+    except ValueError as e:
+        return str(e)
+
+    try:
+        energy, mu_avg, used_files = hu.average_sample_dir(dir_path)
+    except ValueError as e:
+        return str(e)
+
+    result = hu.process_exafs(energy, mu_avg, kmin=kmin, kmax=kmax, kweight=kweight)
+    k = result["k"]
+    chi = result["chi"]
+    sample_label = _get_sample_label(dir_path)
+
+    fig, ax = plt.subplots()
+    ax.plot(k, chi * k**kweight, color="blue", linewidth=1.0, label=sample_label)
+    ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+    ax.set_xlabel(r"k ($\AA^{-1}$)", fontsize=13)
+    ylabel = f"k^{kweight} * chi(k)" if kweight > 0 else "chi(k)"
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.set_title(title or f"EXAFS chi(k) -- {sample_label}")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    img_b64 = _fig_to_base64(fig)
+    _pending_images.append(img_b64)
+    _last_plot_b64 = img_b64
+    _last_plot = {"energy": k, "signal": chi * k**kweight,
+                  "signal_name": f"k{kweight}*chi(k)", "sample": os.path.basename(dir_path)}
+
+    return (f"Plotted EXAFS k^{kweight}*chi(k) for {sample_label}. "
+            f"k range: {k.min():.1f}-{k.max():.1f} A^-1, "
+            f"E0={result['e0']:.1f} eV")
+
+
+def tool_plot_exafs_fft(sample: str, kmin: float = 2.0, kmax: float = None,
+                        kweight: int = 2, rmax: float = 6.0, dk: float = 1.0,
+                        window: str = "hanning", title: str = None, **kw) -> str:
+    global _last_plot, _last_plot_b64
+    try:
+        dir_path = _resolve_sample(sample)
+    except ValueError as e:
+        return str(e)
+
+    try:
+        energy, mu_avg, used_files = hu.average_sample_dir(dir_path)
+    except ValueError as e:
+        return str(e)
+
+    result = hu.process_exafs(energy, mu_avg, kmin=kmin, kmax=kmax,
+                               kweight=kweight, dk=dk, window=window)
+    r = result["r"]
+    mag = result["chir_mag"]
+    sample_label = _get_sample_label(dir_path)
+
+    # Trim to rmax
+    rmask = r <= rmax
+    r_plot, mag_plot = r[rmask], mag[rmask]
+
+    fig, ax = plt.subplots()
+    ax.plot(r_plot, mag_plot, color="blue", linewidth=1.2, label=sample_label)
+    ax.set_xlabel(r"R ($\AA$)", fontsize=13)
+    ax.set_ylabel(r"|$\chi$(R)| ($\AA^{-3}$)", fontsize=13)
+    ax.set_title(title or f"EXAFS FT |chi(R)| -- {sample_label}")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    img_b64 = _fig_to_base64(fig)
+    _pending_images.append(img_b64)
+    _last_plot_b64 = img_b64
+    _last_plot = {"energy": r_plot, "signal": mag_plot,
+                  "signal_name": "|chi(R)|", "sample": os.path.basename(dir_path)}
+
+    # Find peaks
+    from scipy.signal import find_peaks as _fp
+    peaks, _ = _fp(mag_plot, height=0.1*mag_plot.max(), distance=5)
+    peak_info = ", ".join([f"R={r_plot[p]:.2f} A" for p in peaks[:5]])
+
+    return (f"Plotted |chi(R)| for {sample_label} "
+            f"(k={kmin:.1f}-{result['kmax']:.1f} A^-1, "
+            f"kw={kweight}, {window} window).\n"
+            f"Peaks: {peak_info}\n"
+            f"Note: R values are phase-uncorrected (real distances are ~0.3-0.5 A longer).")
+
+
+def tool_compare_exafs_fft(samples: list, kmin: float = 2.0, kmax: float = None,
+                           kweight: int = 2, rmax: float = 6.0,
+                           offset: float = 0, labels: list = None,
+                           title: str = None, **kw) -> str:
+    global _last_plot, _last_plot_b64
+
+    colors = list(plt.cm.tab10.colors)
+    fig, ax = plt.subplots()
+    plot_info = []
+
+    for i, sample_name in enumerate(samples):
+        try:
+            dir_path = _resolve_sample(sample_name)
+        except ValueError as e:
+            plot_info.append(f"  x {sample_name}: {e}")
+            continue
+
+        try:
+            energy, mu_avg, used_files = hu.average_sample_dir(dir_path)
+        except ValueError as e:
+            plot_info.append(f"  x {sample_name}: {e}")
+            continue
+
+        result = hu.process_exafs(energy, mu_avg, kmin=kmin, kmax=kmax, kweight=kweight)
+        r = result["r"]
+        mag = result["chir_mag"]
+
+        rmask = r <= rmax
+        r_plot, mag_plot = r[rmask], mag[rmask]
+
+        v_offset = offset * i
+        lbl = labels[i] if labels and i < len(labels) else _get_sample_label(dir_path)
+        ax.plot(r_plot, mag_plot + v_offset, color=colors[i % len(colors)],
+                linewidth=1.2, label=lbl)
+        plot_info.append(f"  v {lbl}")
+
+    ax.set_xlabel(r"R ($\AA$)", fontsize=13)
+    ax.set_ylabel(r"|$\chi$(R)| ($\AA^{-3}$)", fontsize=13)
+    ax.set_title(title or "EXAFS FT Comparison")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    img_b64 = _fig_to_base64(fig)
+    _pending_images.append(img_b64)
+    _last_plot_b64 = img_b64
+
+    return "EXAFS FT comparison:\n" + "\n".join(plot_info)
+
+
 def tool_generate_macro(element: str, edge: str = "K", count_time: float = 1.0,
                         xanes_step: float = 0.3, exafs_end: float = 500,
                         include_exafs: bool = False, save: bool = False,
@@ -1305,6 +1506,9 @@ TOOL_DISPATCH = {
     "save_image": tool_save_image,
     "process_all": tool_process_all,
     "plot_file": tool_plot_file,
+    "plot_exafs": tool_plot_exafs,
+    "plot_exafs_fft": tool_plot_exafs_fft,
+    "compare_exafs_fft": tool_compare_exafs_fft,
     "generate_macro": tool_generate_macro,
     "generate_run": tool_generate_run,
     "show_macro": tool_show_macro,
@@ -1369,6 +1573,9 @@ Rules:
 - When the user asks "what element" or "identify element" or "what edge", use identify_element
 - When first loading data, consider using identify_element to determine the element being measured
 - If the element is guessed from energy (not metadata), ask the user to confirm
+- When the user asks for "EXAFS", "chi(k)", or "k-space", use plot_exafs
+- When the user asks for "FFT", "Fourier transform", "chi(R)", "|chi(R)|", or "radial distribution", use plot_exafs_fft
+- When the user asks to compare EXAFS FFTs, use compare_exafs_fft
 - When the user asks to "create a macro", "generate a macro", or "make a scan macro", use generate_macro
 - When the user asks to "create a run file", "batch run", or "set up measurements", use generate_run
 - When the user asks to "show macro" or "view macro", use show_macro
